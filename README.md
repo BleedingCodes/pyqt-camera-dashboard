@@ -14,6 +14,23 @@ This application allows you to:
 
 ---
 
+## Main Dashboard
+
+![Dashboard](screenshots/camera_dashboard_interface.png)
+
+---
+
+## First-Time Setup
+
+![Setup Dialog](screenshots/first_launch.png)
+
+---
+
+## Add Camera Dialog
+
+![Add Camera](screenshots/adding_new_camera.png)
+
+---
 # Features
 
 ## First-Time Setup Wizard
