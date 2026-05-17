@@ -12,6 +12,13 @@ This application allows you to:
 - Automatically organize recordings by date and hour
 - Automatically clean up old recordings when disk usage becomes too high
 
+--- 
+
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
+![OpenCV](https://img.shields.io/badge/OpenCV-Video-red)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+
 ---
 
 ## Main Dashboard
@@ -31,6 +38,7 @@ This application allows you to:
 ![Add Camera](screenshots/adding_new_camera.png)
 
 ---
+
 # Features
 
 ## First-Time Setup Wizard
