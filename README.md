@@ -1,5 +1,11 @@
 # PyQt Camera Dashboard
 
+![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
+![OpenCV](https://img.shields.io/badge/OpenCV-Video-red)
+![License](https://img.shields.io/badge/License-MIT-yellow)
+![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-lightgrey)
+
 A multi-camera RTSP dashboard built with Python, OpenCV, and PyQt5.
 
 This application allows you to:
@@ -11,13 +17,6 @@ This application allows you to:
 - Add new cameras directly from the GUI
 - Automatically organize recordings by date and hour
 - Automatically clean up old recordings when disk usage becomes too high
-
---- 
-
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
-![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
-![OpenCV](https://img.shields.io/badge/OpenCV-Video-red)
-![License](https://img.shields.io/badge/License-MIT-yellow)
 
 ---
 
