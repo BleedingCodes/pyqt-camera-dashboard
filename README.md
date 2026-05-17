@@ -68,25 +68,94 @@ Passwords are masked during entry.
 
 ---
 
-# Requirements
+# Installation
 
-- Python 3.10+
-- OpenCV
-- PyQt5
+## Linux / Ubuntu
 
-Install dependencies:
+Install system dependencies:
+
+```bash
+sudo apt update
+sudo apt install python3 python3-pip python3-venv git
+```
+
+Clone the repository:
+
+```bash
+git clone https://github.com/BleedingCodes/pyqt-camera-dashboard.git
+cd pyqt-camera-dashboard
+```
+
+Create and activate a virtual environment:
+
+```bash
+python3 -m venv venv
+source venv/bin/activate
+```
+
+Install Python dependencies:
 
 ```bash
 pip install -r requirements.txt
 ```
 
----
-
-# Running the Application
+Run the app:
 
 ```bash
 python camera_dashboard.py
 ```
+
+---
+
+## Windows
+
+Clone the repository:
+
+```powershell
+git clone https://github.com/BleedingCodes/pyqt-camera-dashboard.git
+cd pyqt-camera-dashboard
+```
+
+Create and activate a virtual environment:
+
+```powershell
+py -m venv venv
+venv\Scripts\activate
+```
+
+Install dependencies:
+
+```powershell
+pip install -r requirements.txt
+```
+
+Run the app:
+
+```powershell
+python camera_dashboard.py
+```
+
+---
+
+## First-Time Launch
+
+On first launch, the app creates:
+
+```text
+camera_config.json
+```
+
+You will be prompted to enter:
+
+- Number of cameras
+- Camera IP address
+- Camera display name
+- Username
+- Password
+
+Passwords are masked in the setup dialog.
+
+Do not upload `camera_config.json` to GitHub.
 
 ---
 
