@@ -29,6 +29,8 @@ Monitor, record, and manage multiple IP cameras from a single dark-theme GUI. Ca
 
 ![Add Camera](screenshots/adding_new_camera.png)
 
+
+> More Screenshots coming soon — live feed content omitted for privacy.
 ---
 
 ## Features
