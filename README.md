@@ -10,6 +10,7 @@ A multi-camera RTSP dashboard built with Python, OpenCV, and PyQt5.
 
 Monitor, record, and manage multiple IP cameras from a single dark-theme GUI. Camera credentials are stored in an encrypted config file — nothing sensitive is ever saved in plaintext.
 
+> **Documentation:** Full setup and user guide produced by [MainByte Labs](https://github.com/MR-MainbyteLabs) — [Read the Guide](https://github.com/MR-MainbyteLabs/technical-docs-portfolio/blob/main/PyQT5_Cam_Dashboard_Setup_Guide.md)
 ---
 
 ## Main Dashboard
