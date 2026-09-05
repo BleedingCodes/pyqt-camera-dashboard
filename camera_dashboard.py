@@ -1,37 +1,48 @@
-
 from __future__ import annotations  # Allows newer type-hint behavior.
 
-import os  
-import glob  
+import os
+import glob
 import json
 import re
-import shutil 
-import cv2  
-import time  
-from dataclasses import dataclass 
-from datetime import datetime 
+import shutil
+import cv2
+import time
+
+from cryptography.fernet import Fernet
+from dataclasses import dataclass
+from datetime import datetime
 from urllib.parse import quote
-from PyQt5.QtCore import QThread, Qt, pyqtSignal  
-from PyQt5.QtGui import QImage, QPixmap 
-from PyQt5.QtWidgets import QApplication, QGridLayout, QHBoxLayout, QLabel, QLineEdit, QMainWindow, QMessageBox, QPushButton, QInputDialog, QVBoxLayout, QWidget  
-from PyQt5 import QtCore  
+from PyQt5.QtCore import QThread, Qt, pyqtSignal
+from PyQt5.QtGui import QImage, QPixmap
+from PyQt5.QtWidgets import (
+    QApplication, QGridLayout, QHBoxLayout, QLabel, QLineEdit,
+    QMainWindow, QMessageBox, QPushButton, QInputDialog, QVBoxLayout, QWidget,
+)
+from PyQt5 import QtCore
 
 os.environ.pop("QT_PLUGIN_PATH", None)  # Removes bad Qt plugin paths that OpenCV may set.
 os.environ.pop("QT_QPA_PLATFORM_PLUGIN_PATH", None)  # Removes bad Qt platform plugin paths.
 os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;5000000"  # Forces RTSP over TCP with a 5-second timeout.
-os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(os.path.dirname(QtCore.__file__), "Qt5", "plugins")  # Forces PyQt5 Qt plugins.
+os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(
+    os.path.dirname(QtCore.__file__), "Qt5", "plugins"
+)  # Forces PyQt5 Qt plugins.
 
+
+# ── Constants ────────────────────────────────────────────────────────────────
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))  # Stores the folder where this script lives.
 CONFIG_FILE = os.path.join(SCRIPT_DIR, "camera_config.json")  # Stores camera setup beside the script.
+KEY_FILE = os.path.join(SCRIPT_DIR, "secret.key")  # Stores encryption key beside the script.
 RECORDINGS_ROOT = os.path.join(SCRIPT_DIR, "recordings")  # Sets recordings folder beside script.
-RECORD_DURATION_SECONDS = 10 * 60  # Sets each recording file to 10 minutes.
+RECORD_DURATION_SECONDS = 15 * 60  # Sets each recording file to 15 minutes.
 DEFAULT_FPS = 15.0  # Sets fallback FPS.
 RECONNECT_DELAY_SECONDS = 3  # Sets delay between reconnect attempts.
 MAX_CONNECT_FAILURES = 3  # Stops trying after 3 failed camera connections.
-MAX_DISK_USAGE = 80  # Deletes oldest recordings when disk usage goes above 80 percent.
+MAX_DISK_USAGE = 75  # Deletes oldest recordings when disk usage goes above 75 percent.
 RTSP_PATH = "/cam/realmonitor?channel=1&subtype=0"  # Uses the same RTSP path format the original script used.
 
+
+# ── Camera config ─────────────────────────────────────────────────────────────
 
 @dataclass(frozen=True)  # Makes camera config read-only.
 class CameraConfig:  # Defines camera settings.
@@ -40,19 +51,64 @@ class CameraConfig:  # Defines camera settings.
     file_prefix: str  # Stores recording filename prefix.
 
 
-CAMERAS = []  # Filled from camera_config.json when the app starts.
+# ── Encryption helpers ────────────────────────────────────────────────────────
 
+def load_or_create_key() -> bytes:  # Loads existing key or generates a new one.
+    if os.path.exists(KEY_FILE):  # Checks whether the key file already exists.
+        with open(KEY_FILE, "rb") as key_file:  # Opens existing key file.
+            return key_file.read()  # Returns stored key bytes.
+    key = Fernet.generate_key()  # Generates a new secure key.
+    with open(KEY_FILE, "wb") as key_file:  # Saves new key to disk.
+        key_file.write(key)  # Writes key bytes.
+    return key  # Returns new key.
+
+
+def get_fernet(key: bytes) -> Fernet:  # Returns a Fernet instance for the given key.
+    return Fernet(key)  # Creates Fernet object.
+
+
+def encrypt_config(key: bytes) -> None:  # Encrypts the JSON config file in place.
+    fernet = get_fernet(key)  # Gets Fernet instance.
+    with open(CONFIG_FILE, "rb") as file:  # Opens plaintext config.
+        data = file.read()  # Reads plaintext bytes.
+    with open(CONFIG_FILE, "wb") as file:  # Overwrites config file.
+        file.write(fernet.encrypt(data))  # Writes encrypted bytes.
+
+
+def decrypt_config(key: bytes) -> dict:  # Decrypts and returns parsed JSON config.
+    fernet = get_fernet(key)  # Gets Fernet instance.
+    with open(CONFIG_FILE, "rb") as file:  # Opens encrypted config.
+        encrypted_data = file.read()  # Reads encrypted bytes.
+    decrypted_data = fernet.decrypt(encrypted_data)  # Decrypts bytes.
+    return json.loads(decrypted_data.decode("utf-8"))  # Returns parsed dict.
+
+
+# ── Filename helpers ──────────────────────────────────────────────────────────
 
 def make_file_prefix(name: str) -> str:  # Creates safe recording filename prefixes from camera names.
     prefix = re.sub(r"[^a-zA-Z0-9_-]+", "_", name.strip().lower()).strip("_")  # Replaces unsafe filename characters.
     return prefix or "camera"  # Uses a fallback when the name has no usable characters.
 
 
+def unique_file_prefix(name: str, existing_prefixes: list[str]) -> str:  # Returns a prefix that does not collide with existing ones.
+    base = make_file_prefix(name)  # Generates base prefix from name.
+    prefix = base  # Starts with base prefix.
+    counter = 2  # Starts duplicate counter at 2.
+    while prefix in existing_prefixes:  # Loops until prefix is unique.
+        prefix = f"{base}_{counter}"  # Appends counter to base.
+        counter += 1  # Increments counter.
+    return prefix  # Returns unique prefix.
+
+
+# ── URL builder ───────────────────────────────────────────────────────────────
+
 def build_rtsp_url(ip_address: str, username: str, password: str) -> str:  # Builds a camera RTSP URL from saved fields.
     safe_username = quote(username, safe="")  # Escapes special characters in the username.
     safe_password = quote(password, safe="")  # Escapes special characters in the password.
     return f"rtsp://{safe_username}:{safe_password}@{ip_address}:554{RTSP_PATH}"  # Returns RTSP stream URL.
 
+
+# ── Camera detail dialogs ─────────────────────────────────────────────────────
 
 def prompt_for_camera_details(parent=None, camera_number: int | None = None) -> dict | None:  # Gets one camera through PyQt dialogs.
     title_suffix = f" Camera {camera_number}" if camera_number is not None else " New Camera"  # Builds dialog title suffix.
@@ -84,39 +140,25 @@ def prompt_for_camera_details(parent=None, camera_number: int | None = None) -> 
         "name": name,
         "username": username,
         "password": password,
-        "file_prefix": make_file_prefix(name),
-    }  # Returns serializable camera settings.
+    }  # Returns serializable camera settings without file_prefix — assigned later to guarantee uniqueness.
 
 
-def prompt_for_first_time_setup(parent=None) -> list[dict]:  # Creates first camera JSON using PyQt dialogs.
-    camera_count, ok = QInputDialog.getInt(parent, "First-time camera setup", "How many cameras do you want to monitor?", 1, 1, 64, 1)  # Asks count.
-    if not ok:
-        return []  # User cancelled setup.
+# ── Config save / load ────────────────────────────────────────────────────────
 
-    camera_details = []  # Stores all entered cameras.
-    for index in range(1, camera_count + 1):  # Loops through requested cameras.
-        details = prompt_for_camera_details(parent, index)  # Gets one camera.
-        if details is None:
-            return []  # User cancelled setup.
-        camera_details.append(details)  # Saves the camera details.
-    save_camera_details(camera_details)  # Writes JSON file after successful setup.
-    return camera_details  # Returns all configured cameras.
-
-
-def save_camera_details(camera_details: list[dict]) -> None:  # Writes camera settings to JSON.
-    with open(CONFIG_FILE, "w", encoding="utf-8") as file:
+def save_camera_details(camera_details: list[dict], key: bytes) -> None:  # Writes and encrypts camera settings.
+    with open(CONFIG_FILE, "w", encoding="utf-8") as file:  # Writes plaintext JSON.
         json.dump({"cameras": camera_details}, file, indent=4)  # Saves readable JSON.
+    encrypt_config(key)  # Encrypts the file immediately after writing.
 
 
-def load_camera_details(parent=None) -> list[dict]:  # Loads existing JSON or launches first-time setup.
+def load_camera_details(key: bytes, parent=None) -> list[dict]:  # Decrypts and loads config, or runs first-time setup.
     if not os.path.exists(CONFIG_FILE):  # Checks whether setup has already happened.
-        return prompt_for_first_time_setup(parent)  # Runs first-time setup dialogs.
+        return prompt_for_first_time_setup(key, parent)  # Runs first-time setup dialogs.
 
     try:
-        with open(CONFIG_FILE, "r", encoding="utf-8") as file:
-            data = json.load(file)  # Reads camera JSON.
-    except (OSError, json.JSONDecodeError) as exc:
-        QMessageBox.critical(parent, "Camera config error", f"Could not load {CONFIG_FILE}:\n{exc}")  # Shows readable error.
+        data = decrypt_config(key)  # Decrypts and parses existing config.
+    except Exception as exc:  # Catches bad key or corrupted file.
+        QMessageBox.critical(parent, "Camera config error", f"Could not decrypt {CONFIG_FILE}:\n{exc}")  # Shows readable error.
         return []  # Prevents starting with unknown settings.
 
     camera_details = data.get("cameras", [])  # Reads saved camera list.
@@ -126,14 +168,46 @@ def load_camera_details(parent=None) -> list[dict]:  # Loads existing JSON or la
     return camera_details  # Returns saved settings.
 
 
+def prompt_for_first_time_setup(key: bytes, parent=None) -> list[dict]:  # Creates first camera JSON using PyQt dialogs.
+    camera_count, ok = QInputDialog.getInt(
+        parent, "First-time camera setup",
+        "How many cameras do you want to monitor?", 1, 1, 64, 1
+    )  # Asks count.
+    if not ok:
+        return []  # User cancelled setup.
+
+    camera_details = []  # Stores all entered cameras.
+    existing_prefixes: list[str] = []  # Tracks assigned prefixes to prevent collisions.
+
+    for index in range(1, camera_count + 1):  # Loops through requested cameras.
+        details = prompt_for_camera_details(parent, index)  # Gets one camera.
+        if details is None:
+            return []  # User cancelled setup.
+        prefix = unique_file_prefix(details["name"], existing_prefixes)  # Assigns unique prefix.
+        details["file_prefix"] = prefix  # Stores prefix in details.
+        existing_prefixes.append(prefix)  # Tracks used prefix.
+        camera_details.append(details)  # Saves the camera details.
+
+    save_camera_details(camera_details, key)  # Writes and encrypts JSON after successful setup.
+    return camera_details  # Returns all configured cameras.
+
+
+# ── Config → CameraConfig ─────────────────────────────────────────────────────
+
 def camera_details_to_config(details: dict) -> CameraConfig:  # Converts JSON camera data into the worker config.
     name = str(details.get("name", "Camera")).strip() or "Camera"  # Reads display name.
     url = details.get("url")  # Allows older/future configs to store a full URL.
     if not url:
-        url = build_rtsp_url(str(details.get("ip_address", "")).strip(), str(details.get("username", "")).strip(), str(details.get("password", "")))  # Builds URL from fields.
+        url = build_rtsp_url(
+            str(details.get("ip_address", "")).strip(),
+            str(details.get("username", "")).strip(),
+            str(details.get("password", "")),
+        )  # Builds URL from fields.
     file_prefix = str(details.get("file_prefix", make_file_prefix(name))).strip() or make_file_prefix(name)  # Reads recording prefix.
     return CameraConfig(name=name, url=url, file_prefix=file_prefix)  # Returns immutable camera config.
 
+
+# ── Recording helpers ─────────────────────────────────────────────────────────
 
 def hour_folder() -> str:  # Creates/returns current recording folder.
     now = datetime.now()  # Gets current date and time.
@@ -144,7 +218,7 @@ def hour_folder() -> str:  # Creates/returns current recording folder.
 
 def cleanup_by_disk_usage() -> None:  # Deletes oldest recordings only when disk usage is too high.
     os.makedirs(RECORDINGS_ROOT, exist_ok=True)  # Ensures recordings folder exists.
-    total, used, free = shutil.disk_usage(RECORDINGS_ROOT)  # Reads disk usage for recordings drive.
+    total, used, _ = shutil.disk_usage(RECORDINGS_ROOT)  # Reads disk usage for recordings drive.
     used_percent = (used / total) * 100  # Calculates disk used percentage.
     if used_percent < MAX_DISK_USAGE:  # Checks whether disk usage is still safe.
         return  # Stops because cleanup is not needed.
@@ -152,10 +226,10 @@ def cleanup_by_disk_usage() -> None:  # Deletes oldest recordings only when disk
     files = glob.glob(os.path.join(RECORDINGS_ROOT, "**", "*.mp4"), recursive=True)  # Finds all recording files.
     files.sort(key=lambda path: os.path.getmtime(path))  # Sorts files oldest first.
     for file in files:  # Loops through recordings from oldest to newest.
-        try:  # Starts safe delete block.
+        try:
             os.remove(file)  # Deletes the oldest recording file.
             print(f"Deleted oldest recording: {file}")  # Prints deleted file.
-            total, used, free = shutil.disk_usage(RECORDINGS_ROOT)  # Rechecks disk usage.
+            total, used, _ = shutil.disk_usage(RECORDINGS_ROOT)  # Rechecks disk usage.
             used_percent = (used / total) * 100  # Recalculates used percentage.
             if used_percent < MAX_DISK_USAGE:  # Checks whether usage is safe again.
                 print("Disk usage back to safe level.")  # Prints safe message.
@@ -164,11 +238,13 @@ def cleanup_by_disk_usage() -> None:  # Deletes oldest recordings only when disk
             print(f"Could not delete {file}: {exc}")  # Prints delete error.
 
 
+# ── Camera worker ─────────────────────────────────────────────────────────────
+
 class CameraWorker(QThread):  # Background camera thread.
     frame_ready = pyqtSignal(object)  # Sends frames to GUI.
     status_changed = pyqtSignal(str)  # Sends status text to GUI.
     recording_changed = pyqtSignal(bool)  # Sends recording state to GUI.
-    failed_permanently = pyqtSignal()  # Tells GUI to remove failed camera tile.
+    failed_permanently = pyqtSignal()  # Tells GUI camera has gone offline.
 
     def __init__(self, camera: CameraConfig):  # Initializes camera worker.
         super().__init__()  # Initializes QThread.
@@ -181,294 +257,360 @@ class CameraWorker(QThread):  # Background camera thread.
         self.fps = DEFAULT_FPS  # Stores recording FPS.
         self.cap = None  # Stores VideoCapture object.
         self.connect_failures = 0  # Counts failed camera connections.
-        
+        self.reconnect_requested = False  # Requests a manual reconnect without blocking the GUI.
 
     def run(self) -> None:  # Runs thread loop.
-        while self.running:  # Keeps worker alive until stopped.
-            self.status_changed.emit(f"Connecting... attempt {self.connect_failures + 1}/{MAX_CONNECT_FAILURES}")  # Updates GUI status.
+        while self.running:
+            self.status_changed.emit(
+                f"Connecting... attempt {self.connect_failures + 1}/{MAX_CONNECT_FAILURES}"
+            )  # Updates GUI status.
             self.cap = cv2.VideoCapture(self.camera.url, cv2.CAP_FFMPEG)  # Opens camera stream.
             self.cap.set(cv2.CAP_PROP_BUFFERSIZE, 2)  # Reduces camera buffer lag.
-            if not self.cap.isOpened():  # Checks failed connection.
-                self.connect_failures += 1  # Adds failed attempt.
-                self._release_capture()  # Releases failed capture.
-                if self.connect_failures >= MAX_CONNECT_FAILURES:  # Checks failure limit.
-                    self.status_changed.emit("Failed 3 times. Removing camera.")  # Shows final failure.
-                    self.failed_permanently.emit()  # Requests tile removal.
-                    self.running = False  # Stops worker.
-                    break  # Exits loop.
-                self.status_changed.emit("Connection failed. Retrying...")  # Shows retry message.
-                time.sleep(RECONNECT_DELAY_SECONDS)  # Waits before retry.
-                continue  # Tries again.
-            self.connect_failures = 0  # Resets failures after success.
-            self.status_changed.emit("Live")  # Shows live status.
-            self.fps = self.cap.get(cv2.CAP_PROP_FPS)  # Gets camera FPS.
-            
-            if not self.fps or self.fps <= 1 or self.fps > 60:  # Checks bad FPS value.
-                self.fps = DEFAULT_FPS  # Uses fallback FPS.
-            while self.running and self.cap.isOpened():  # Reads frames while connected.
-                ok, frame = self.cap.read()  # Reads one frame.
-                if not ok or frame is None:  # Checks frame failure.
-                    self.status_changed.emit("Frame lost. Reconnecting...")  # Shows reconnect message.
-                    break  # Reconnects.
-                self.frame_ready.emit(frame)  # Sends frame to GUI.
-                if self.recording:  # Checks recording state.
-                    self._write_frame(frame)  # Writes frame to disk.
-            self._release_capture()  # Releases stream.
-            if self.running:  # Checks if not stopped manually.
-                time.sleep(RECONNECT_DELAY_SECONDS)  # Waits before reconnect.
-        self.stop_recording()  # Stops recording.
-        self._release_capture()  # Releases capture.
-        self.status_changed.emit("Stopped")  # Shows stopped status.
-        
+
+            if not self.cap.isOpened():
+                self.connect_failures += 1
+                self._release_capture()
+                if self.connect_failures >= MAX_CONNECT_FAILURES:
+                    self.status_changed.emit("Offline")
+                    self.failed_permanently.emit()
+                    self.running = False
+                    return
+                self.status_changed.emit("Connection failed. Retrying...")
+                time.sleep(RECONNECT_DELAY_SECONDS)
+                continue
+
+            self.connect_failures = 0
+            self.status_changed.emit("Live")
+            self.fps = self.cap.get(cv2.CAP_PROP_FPS)
+            if not self.fps or self.fps <= 1 or self.fps > 60:
+                self.fps = DEFAULT_FPS
+
+            manual_reconnect = False
+
+            while self.running and self.cap.isOpened():
+                if self.reconnect_requested:
+                    self.reconnect_requested = False
+                    manual_reconnect = True
+                    self.status_changed.emit("Reconnecting...")
+                    break
+                ok, frame = self.cap.read()
+                if not ok or frame is None:
+                    self.status_changed.emit("Frame lost. Reconnecting...")
+                    break
+                self.frame_ready.emit(frame)
+                if self.recording:
+                    self._write_frame(frame)
+
+            self._release_capture()
+            if self.running and not manual_reconnect:
+                time.sleep(RECONNECT_DELAY_SECONDS)
+
+        self.stop_recording()
+        self._release_capture()
+        self.status_changed.emit("Stopped")
+
     def start_recording(self) -> None:  # Starts recording.
-        if not self.running:  # Checks if worker stopped.
-            return  # Does nothing.
-        self.recording = True  # Enables recording.
-        self.recording_changed.emit(True)  # Updates GUI.
-        self.status_changed.emit("Recording")  # Shows recording status.
-        
+        if not self.running:
+            return
+        self.recording = True
+        self.recording_changed.emit(True)
+        self.status_changed.emit("Recording")
 
     def stop_recording(self) -> None:  # Stops recording.
-        self.recording = False  # Disables recording.
-        self.recording_changed.emit(False)  # Updates GUI.
-        if self.writer is not None:  # Checks if writer exists.
-            self.writer.release()  # Closes video file.
-            self.writer = None  # Clears writer.
-            self.writer_size = None  # Clears writer size.
-        self.status_changed.emit("Live" if self.running else "Stopped")  # Shows status.
+        self.recording = False
+        self.recording_changed.emit(False)
+        if self.writer is not None:
+            self.writer.release()
+            self.writer = None
+            self.writer_size = None
+        self.status_changed.emit("Live" if self.running else "Stopped")
+
+    def request_reconnect(self) -> None:  # Requests a reconnect without blocking the GUI.
+        self.connect_failures = 0
+        if self.isRunning():
+            self.reconnect_requested = True
+            return
+        self.running = True
+        self.reconnect_requested = False
+        self.start()
 
     def stop_worker(self) -> None:  # Stops worker thread.
-        self.running = False  # Tells loop to stop.
+        self.running = False
+        self.reconnect_requested = False
 
     def _write_frame(self, frame) -> None:  # Writes frame to active recording.
-        if self.writer is None:  # Checks if new file needed.
-            self._open_new_writer(frame)  # Opens new recording file.
-        if self.writer is None:  # Checks if writer failed.
-            return  # Skips write.
-        if self.writer_size is not None:  # Checks writer size.
-            width, height = self.writer_size  # Gets target size.
-            if frame.shape[1] != width or frame.shape[0] != height:  # Checks size mismatch.
-                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)  # Resizes frame.
-        self.writer.write(frame)  # Writes frame.
-        if self.record_start and (datetime.now() - self.record_start).total_seconds() >= RECORD_DURATION_SECONDS:  # Checks segment length.
-            self.writer.release()  # Closes current segment.
-            self.writer = None  # Clears writer.
-            self.writer_size = None  # Clears size.
-            self._open_new_writer(frame)  # Opens next segment.
-
+        if self.writer is None:
+            self._open_new_writer(frame)
+        if self.writer is None:
+            return
+        if self.writer_size is not None:
+            width, height = self.writer_size
+            if frame.shape[1] != width or frame.shape[0] != height:
+                frame = cv2.resize(frame, (width, height), interpolation=cv2.INTER_AREA)
+        self.writer.write(frame)
+        if self.record_start and (
+            datetime.now() - self.record_start
+        ).total_seconds() >= RECORD_DURATION_SECONDS:
+            self.writer.release()
+            self.writer = None
+            self.writer_size = None
+            self._open_new_writer(frame)
 
     def _open_new_writer(self, frame) -> None:  # Opens new video file.
-        self.record_start = datetime.now()  # Stores start time.
-        filename = f"{self.camera.file_prefix}_{self.record_start.strftime('%Y-%m-%d_%H-%M-%S')}.mp4"  # Creates filename.
-        path = os.path.join(hour_folder(), filename)  # Creates full path.
-        height, width = frame.shape[:2]  # Gets frame size.
-        self.writer_size = (width, height)  # Stores writer size.
-        fourcc = cv2.VideoWriter_fourcc(*"mp4v")  # Sets MP4 codec.
-        self.writer = cv2.VideoWriter(path, fourcc, self.fps, self.writer_size)  # Creates writer.
-        if not self.writer.isOpened():  # Checks writer failure.
-            self.status_changed.emit("Recording failed: VideoWriter did not open")  # Shows error.
-            self.writer = None  # Clears failed writer.
-            self.writer_size = None  # Clears size.
-            return  # Stops.
-        self.status_changed.emit(f"Recording: {os.path.basename(path)}")  # Shows filename.
-        print(f"Recording started: {path}")  # Prints path.
+        self.record_start = datetime.now()
+        filename = (
+            f"{self.camera.file_prefix}_{self.record_start.strftime('%Y-%m-%d_%H-%M-%S')}.mp4"
+        )  # Creates filename.
+        path = os.path.join(hour_folder(), filename)
+        height, width = frame.shape[:2]
+        self.writer_size = (width, height)
+        fourcc = cv2.VideoWriter_fourcc(*"mp4v")
+        self.writer = cv2.VideoWriter(path, fourcc, self.fps, self.writer_size)
+        if not self.writer.isOpened():
+            self.status_changed.emit("Recording failed: VideoWriter did not open")
+            self.writer = None
+            self.writer_size = None
+            return
+        self.status_changed.emit(f"Recording: {os.path.basename(path)}")
+        print(f"Recording started: {path}")
 
     def _release_capture(self) -> None:  # Releases camera stream.
-        if self.cap is not None:  # Checks if capture exists.
-            self.cap.release()  # Releases capture.
-            self.cap = None  # Clears capture.
+        if self.cap is not None:
+            self.cap.release()
+            self.cap = None
 
+
+# ── Camera tile ───────────────────────────────────────────────────────────────
 
 class CameraTile(QWidget):  # GUI tile for one camera.
-    remove_requested = pyqtSignal(object)  # Signal to remove this tile.
+    remove_requested = pyqtSignal(object)  # Signal to remove this tile from the dashboard.
 
     def __init__(self, camera: CameraConfig):  # Initializes tile.
-        super().__init__()  # Initializes QWidget.
-        self.camera = camera  # Stores camera config.
-        self.title = QLabel(camera.name)  # Creates title label.
-        self.title.setAlignment(Qt.AlignCenter)  # Centers title.
-        self.title.setStyleSheet("font-weight: bold; font-size: 16px;")  # Styles title.
-        self.video = QLabel("Waiting for camera...")  # Creates video label.
-        self.video.setAlignment(Qt.AlignCenter)  # Centers video text.
-        self.video.setMinimumSize(420, 260)  # Sets minimum video size.
-        self.video.setStyleSheet("background: #111; color: white; border: 1px solid #333;")  # Styles video area.
-        self.status = QLabel("Starting...")  # Creates status label.
-        self.status.setAlignment(Qt.AlignCenter)  # Centers status.
-        self.record_button = QPushButton("Start Recording")  # Creates record button.
-        self.record_button.clicked.connect(self.toggle_recording)  # Connects button.
-        layout = QVBoxLayout()  # Creates vertical layout.
-        layout.addWidget(self.title)  # Adds title.
-        layout.addWidget(self.video)  # Adds video.
-        layout.addWidget(self.status)  # Adds status.
-        layout.addWidget(self.record_button)  # Adds button.
-        self.setLayout(layout)  # Applies layout.
-        self.worker = CameraWorker(camera)  # Creates worker.
-        self.worker.frame_ready.connect(self.update_frame)  # Connects frame signal.
-        self.worker.status_changed.connect(self.status.setText)  # Connects status signal.
-        self.worker.recording_changed.connect(self.update_record_button)  # Connects recording signal.
-        self.worker.failed_permanently.connect(self.remove_self)  # Connects failure signal.
-        self.worker.start()  # Starts worker thread.
+        super().__init__()
+        self.camera = camera
 
-    def toggle_recording(self) -> None:  # Toggles recording.
-        if self.worker.recording:  # Checks if recording.
-            self.worker.stop_recording()  # Stops recording.
-        else:  # Handles not recording.
-            self.worker.start_recording()  # Starts recording.
+        self.title = QLabel(camera.name)
+        self.title.setAlignment(Qt.AlignCenter)
+        self.title.setStyleSheet("font-weight: bold; font-size: 16px;")
 
-    def update_record_button(self, recording: bool) -> None:  # Updates button text.
-        self.record_button.setText("Stop Recording" if recording else "Start Recording")  # Sets button text.
+        self.video = QLabel("Waiting for camera...")
+        self.video.setAlignment(Qt.AlignCenter)
+        self.video.setMinimumSize(420, 260)
+        self.video.setStyleSheet("background: #111; color: white; border: 1px solid #333;")
+
+        self.status = QLabel("Starting...")
+        self.status.setAlignment(Qt.AlignCenter)
+
+        self.record_button = QPushButton("Start Recording")
+        self.record_button.clicked.connect(self.toggle_recording)
+
+        self.reconnect_button = QPushButton("Reconnect")
+        self.reconnect_button.clicked.connect(self.reconnect_camera)
+
+        self.remove_button = QPushButton("Remove")  # Removes this tile from the session.
+        self.remove_button.clicked.connect(self.request_remove)  # Connects remove button.
+        self.remove_button.setStyleSheet("color: #ff6666;")  # Styles remove button red to distinguish it.
+
+        layout = QVBoxLayout()
+        layout.addWidget(self.title)
+        layout.addWidget(self.video)
+        layout.addWidget(self.status)
+        layout.addWidget(self.record_button)
+        layout.addWidget(self.reconnect_button)
+        layout.addWidget(self.remove_button)  # Adds remove button below reconnect.
+        self.setLayout(layout)
+
+        self.worker = CameraWorker(camera)
+        self.worker.frame_ready.connect(self.update_frame)
+        self.worker.status_changed.connect(self.handle_status)
+        self.worker.recording_changed.connect(self.update_record_button)
+        self.worker.failed_permanently.connect(self.camera_failed)
+        self.worker.start()
+
+    def request_remove(self) -> None:  # Emits signal to remove this tile for the session.
+        self.remove_requested.emit(self)  # Tells MainWindow to remove this tile.
+
+    def reconnect_camera(self) -> None:  # Reconnects only this camera without freezing the dashboard.
+        self.reconnect_button.setEnabled(False)
+        self.reconnect_button.setText("Reconnecting...")
+        self.status.setText("Reconnecting...")
+        self.video.clear()
+        self.video.setText("Reconnecting...")
+        self.worker.request_reconnect()
+
+    def handle_status(self, message: str) -> None:  # Updates status label and button states.
+        self.status.setText(message)
+        if message == "Live":
+            self.record_button.setEnabled(True)
+            self.reconnect_button.setEnabled(True)
+            self.reconnect_button.setText("Reconnect")
+        elif message == "Offline":
+            self.reconnect_button.setEnabled(True)
+            self.reconnect_button.setText("Reconnect")
+
+    def camera_failed(self) -> None:  # Keeps tile visible after connection attempts fail.
+        self.video.clear()
+        self.video.setText("Camera Offline")
+        self.record_button.setEnabled(False)
+        self.reconnect_button.setEnabled(True)
+        self.reconnect_button.setText("Reconnect")
+
+    def toggle_recording(self) -> None:  # Toggles recording on this tile.
+        if self.worker.recording:
+            self.worker.stop_recording()
+        else:
+            self.worker.start_recording()
+
+    def update_record_button(self, recording: bool) -> None:  # Updates record button text.
+        self.record_button.setText("Stop Recording" if recording else "Start Recording")
 
     def update_frame(self, frame) -> None:  # Updates displayed frame.
-        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)  # Converts BGR to RGB.
-        h, w, channels = rgb.shape  # Gets frame dimensions.
-        bytes_per_line = channels * w  # Calculates row size.
-        image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)  # Creates Qt image.
-        pixmap = QPixmap.fromImage(image)  # Creates pixmap.
-        self.video.setPixmap(pixmap.scaled(self.video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation))  # Shows scaled frame.
+        rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
+        h, w, channels = rgb.shape
+        bytes_per_line = channels * w
+        image = QImage(rgb.data, w, h, bytes_per_line, QImage.Format_RGB888)
+        pixmap = QPixmap.fromImage(image)
+        self.video.setPixmap(
+            pixmap.scaled(self.video.size(), Qt.KeepAspectRatio, Qt.SmoothTransformation)
+        )
 
-    def remove_self(self) -> None:  # Removes failed camera tile.
-        self.record_button.setEnabled(False)  # Disables record button.
-        self.video.setText("Camera unavailable")  # Shows unavailable text.
-        self.remove_requested.emit(self)  # Requests removal.
+    def shutdown(self) -> None:  # Safely shuts down tile worker.
+        self.worker.stop_worker()
+        self.worker.wait(3000)
 
-    def shutdown(self) -> None:  # Safely shuts down tile.
-        self.worker.stop_worker()  # Stops worker.
-        self.worker.wait(3000)  # Waits for worker.
 
+# ── Main window ───────────────────────────────────────────────────────────────
 
 class MainWindow(QMainWindow):  # Main dashboard window.
-    def __init__(self, camera_details: list[dict]):  # Initializes dashboard.
-        super().__init__()  # Initializes QMainWindow.
+    def __init__(self, camera_details: list[dict], key: bytes):  # Initializes dashboard.
+        super().__init__()
         self.camera_details = camera_details  # Stores JSON-backed camera details.
-        self.setWindowTitle("Camera Dashboard")  # Sets window title.
-        self.resize(1400, 850)  # Sets starting size.
-        self.tiles = []  # Stores active camera tiles.
-        self.grid = QGridLayout()  # Creates camera grid.
-        for details in self.camera_details:  # Loops through saved cameras.
-            self.add_camera_tile(camera_details_to_config(details))  # Creates and stores each saved camera tile.
-        self.rebuild_grid()  # Builds grid.
-        controls = QHBoxLayout()  # Creates control row.
-        self.add_camera_button = QPushButton("+")  # Creates add-camera button.
-        self.add_camera_button.setFixedWidth(40)  # Keeps the plus button small.
-        self.record_all = QPushButton("Start All")  # Creates Start All button.
-        self.stop_all_button = QPushButton("Stop All")  # Creates Stop All button.
-        self.add_camera_button.clicked.connect(self.add_camera_from_dialog)  # Connects add-camera button.
-        self.record_all.clicked.connect(self.start_all)  # Connects Start All.
-        self.stop_all_button.clicked.connect(self.stop_all)  # Connects Stop All.
-        controls.addWidget(self.add_camera_button)  # Adds plus button.
-        controls.addWidget(self.record_all)  # Adds Start All.
-        controls.addWidget(self.stop_all_button)  # Adds Stop All.
-        main_layout = QVBoxLayout()  # Creates main layout.
-        main_layout.addLayout(self.grid)  # Adds grid.
-        main_layout.addLayout(controls)  # Adds controls.
-        container = QWidget()  # Creates central widget.
-        container.setLayout(main_layout)  # Sets main layout.
-        self.setCentralWidget(container)  # Sets central widget.
-        self.cleanup_timer = QtCore.QTimer(self)  # Creates cleanup timer.
-        self.cleanup_timer.timeout.connect(cleanup_by_disk_usage)  # Connects timer to disk cleanup.
+        self.key = key  # Stores encryption key for save operations.
+        self.setWindowTitle("Camera Dashboard")
+        self.resize(1400, 850)
+        self.tiles: list[CameraTile] = []
+        self.grid = QGridLayout()
+
+        for details in self.camera_details:
+            self.add_camera_tile(camera_details_to_config(details))
+        self.rebuild_grid()
+
+        controls = QHBoxLayout()
+        self.add_camera_button = QPushButton("+")
+        self.add_camera_button.setFixedWidth(40)
+        self.record_all = QPushButton("Start All")
+        self.stop_all_button = QPushButton("Stop All")
+        self.add_camera_button.clicked.connect(self.add_camera_from_dialog)
+        self.record_all.clicked.connect(self.start_all)
+        self.stop_all_button.clicked.connect(self.stop_all)
+        controls.addWidget(self.add_camera_button)
+        controls.addWidget(self.record_all)
+        controls.addWidget(self.stop_all_button)
+
+        main_layout = QVBoxLayout()
+        main_layout.addLayout(self.grid)
+        main_layout.addLayout(controls)
+        container = QWidget()
+        container.setLayout(main_layout)
+        self.setCentralWidget(container)
+
+        self.cleanup_timer = QtCore.QTimer(self)
+        self.cleanup_timer.timeout.connect(cleanup_by_disk_usage)
         self.cleanup_timer.start(60 * 60 * 1000)  # Runs disk cleanup every hour.
 
-    def add_camera_tile(self, camera: CameraConfig) -> None:  # Adds a camera tile and starts its worker.
-        tile = CameraTile(camera)  # Creates camera tile.
-        tile.remove_requested.connect(self.remove_tile)  # Connects removal signal.
-        self.tiles.append(tile)  # Stores tile.
+    def add_camera_tile(self, camera: CameraConfig) -> None:  # Adds a camera tile to the dashboard.
+        tile = CameraTile(camera)
+        tile.remove_requested.connect(self.remove_tile)  # Connects both failure and manual remove to same handler.
+        self.tiles.append(tile)
 
     def add_camera_from_dialog(self) -> None:  # Adds one new camera while the app is running.
-        details = prompt_for_camera_details(self)  # Gets camera details from PyQt dialogs.
+        existing_prefixes = [
+            str(d.get("file_prefix", "")) for d in self.camera_details
+        ]  # Collects existing prefixes to prevent collisions.
+        details = prompt_for_camera_details(self)
         if details is None:
-            return  # User cancelled.
-        self.camera_details.append(details)  # Adds new camera to in-memory JSON data.
-        save_camera_details(self.camera_details)  # Persists the new camera immediately.
-        self.add_camera_tile(camera_details_to_config(details))  # Starts the new camera worker.
-        self.record_all.setEnabled(True)  # Ensures controls are enabled after adding a camera.
-        self.stop_all_button.setEnabled(True)  # Ensures controls are enabled after adding a camera.
-        self.rebuild_grid()  # Displays the new camera without restarting.
+            return
+        prefix = unique_file_prefix(details["name"], existing_prefixes)  # Assigns unique prefix.
+        details["file_prefix"] = prefix  # Stores unique prefix in details.
+        self.camera_details.append(details)
+        save_camera_details(self.camera_details, self.key)  # Saves and encrypts updated config.
+        self.add_camera_tile(camera_details_to_config(details))
+        self.record_all.setEnabled(True)
+        self.stop_all_button.setEnabled(True)
+        self.rebuild_grid()
 
-    def rebuild_grid(self) -> None:  # Rebuilds camera layout.
-        while self.grid.count():  # Removes existing layout items.
-            item = self.grid.takeAt(0)  # Takes one item.
-            widget = item.widget()  # Gets widget.
-            if widget is not None:  # Checks widget exists.
-                self.grid.removeWidget(widget)  # Removes widget.
-        for index, tile in enumerate(self.tiles):  # Loops through active tiles.
-            row = index // 2  # Calculates row.
-            col = index % 2  # Calculates column.
-            self.grid.addWidget(tile, row, col)  # Adds tile.
+    def rebuild_grid(self) -> None:  # Rebuilds camera layout after any tile change.
+        while self.grid.count():
+            item = self.grid.takeAt(0)
+            widget = item.widget()
+            if widget is not None:
+                self.grid.removeWidget(widget)
+        for index, tile in enumerate(self.tiles):
+            row = index // 2
+            col = index % 2
+            self.grid.addWidget(tile, row, col)
 
-    def remove_tile(self, tile: CameraTile) -> None:  # Removes failed tile.
-        if tile in self.tiles:  # Checks if active.
-            tile.shutdown()  # Stops tile worker.
-            self.tiles.remove(tile)  # Removes from list.
-            self.grid.removeWidget(tile)  # Removes from grid.
-            tile.setParent(None)  # Detaches tile.
-            tile.deleteLater()  # Schedules deletion.
-            self.rebuild_grid()  # Rebuilds grid.
-        if not self.tiles:  # Checks if no cameras left.
-            self.record_all.setEnabled(False)  # Disables Start All.
-            self.stop_all_button.setEnabled(False)  # Disables Stop All.
+    def remove_tile(self, tile: CameraTile) -> None:  # Removes a tile from the session without touching the config.
+        if tile in self.tiles:
+            tile.shutdown()  # Stops the worker thread safely.
+            self.tiles.remove(tile)
+            self.grid.removeWidget(tile)
+            tile.setParent(None)
+            tile.deleteLater()
+            self.rebuild_grid()
+        if not self.tiles:
+            self.record_all.setEnabled(False)
+            self.stop_all_button.setEnabled(False)
 
     def start_all(self) -> None:  # Starts all recordings.
-        for tile in self.tiles:  # Loops through tiles.
-            if not tile.worker.recording:  # Checks if not recording.
-                tile.worker.start_recording()  # Starts recording.
-        
+        for tile in self.tiles:
+            if not tile.worker.recording:
+                tile.worker.start_recording()
 
     def stop_all(self) -> None:  # Stops all recordings.
-        for tile in self.tiles:  # Loops through tiles.
-            if tile.worker.recording:  # Checks if recording.
-                tile.worker.stop_recording()  # Stops recording.
+        for tile in self.tiles:
+            if tile.worker.recording:
+                tile.worker.stop_recording()
 
     def closeEvent(self, event) -> None:  # Handles window close.
-        for tile in self.tiles:  # Loops through tiles.
-            tile.worker.stop_worker()  # Stops workers.
-        for tile in self.tiles:  # Loops again.
-            tile.worker.wait(3000)  # Waits for workers.
-        event.accept()  # Allows close.
+        for tile in self.tiles:
+            tile.worker.stop_worker()
+        for tile in self.tiles:
+            tile.worker.wait(3000)
+        event.accept()
 
-cleanup_by_disk_usage()
+
+# ── Entry point ───────────────────────────────────────────────────────────────
+
+cleanup_by_disk_usage()  # Runs disk cleanup before GUI starts.
+
 def main() -> None:  # Program entry point.
-    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)  # Enables high-DPI scaling.
-    app = QApplication([])  # Creates Qt app.
-    app.setStyleSheet(""" 
-QMainWindow {
-    background-color: #121212;
-}
-
-QWidget {
-    background-color: #121212;
-    color: #eeeeee;
-    font-size: 14px;
-}
-
-QLabel {
-    color: #eeeeee;
-}
-
+    QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
+    app = QApplication([])
+    app.setStyleSheet("""
+QMainWindow { background-color: #121212; }
+QWidget { background-color: #121212; color: #eeeeee; font-size: 14px; }
+QLabel { color: #eeeeee; }
 QPushButton {
-    background-color: #2b2b2b;
-    color: #eeeeee;
-    border: 1px solid #555555;
-    padding: 8px;
-    border-radius: 6px;
+    background-color: #2b2b2b; color: #eeeeee;
+    border: 1px solid #555555; padding: 8px; border-radius: 6px;
 }
+QPushButton:hover { background-color: #3a3a3a; }
+QPushButton:pressed { background-color: #1f1f1f; }
+""")
 
-QPushButton:hover {
-    background-color: #3a3a3a;
-}
+    key = load_or_create_key()  # Loads or generates encryption key at startup.
+    camera_details = load_camera_details(key)  # Decrypts and loads config, or runs first-time setup.
 
-QPushButton:pressed {
-    background-color: #1f1f1f;
-}
-""")  # Applies dark GUI theme.
-    camera_details = load_camera_details()  # Loads JSON config or runs first-time PyQt setup.
     if not camera_details:
-        QMessageBox.information(None, "Camera Dashboard", "No cameras were configured. The app will close.")  # Explains why app exits.
-        return  # Stops when setup is cancelled or invalid.
-    cleanup_by_disk_usage()  # Runs disk cleanup once at startup.
-    window = MainWindow(camera_details)  # Creates dashboard using JSON-backed camera settings.
-    window.showMaximized()  # Shows dashboard.
-    app.exec_()  # Starts GUI loop.
+        QMessageBox.information(None, "Camera Dashboard", "No cameras were configured. The app will close.")
+        return
+
+    cleanup_by_disk_usage()
+    window = MainWindow(camera_details, key)  # Passes key into window for save operations.
+    window.showMaximized()
+    app.exec_()
 
 
-if __name__ == "__main__":  # Checks direct script run.
-    main()  # Starts app.
+if __name__ == "__main__":
+    main()
