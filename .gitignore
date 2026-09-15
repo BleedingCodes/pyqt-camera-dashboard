@@ -1,18 +1,32 @@
-# Camera credentials
-camera_config.json
+# Secrets and encrypted config — never commit these
 secret.key
+camera_config.json
 
 # Recordings
 recordings/
 
-# Python cache
+# Python
 __pycache__/
-*.pyc
+*.py[cod]
+*.pyo
+*.pyd
 
 # Virtual environments
 venv/
-.env/
+.venv/
+env/
 
-# OS junk
+# Distribution / packaging
+dist/
+build/
+*.egg-info/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS
 .DS_Store
 Thumbs.db
