@@ -4,6 +4,23 @@ All notable changes to the PyQt Camera Dashboard are documented here.
 
 ---
 
+## [v3.0.1] — 2026-09-14
+
+### Fixed
+- `CameraWorker.run()`: early return on permanent camera failure now calls `stop_recording()` before returning — previously leaked an open `VideoWriter` if the camera failed while recording
+- `secret.key` is now created with `0o600` permissions (owner read/write only) — previously created with process umask, which is typically world-readable on Linux
+- `closeEvent` now explicitly calls `stop_recording()` on all tiles before stopping worker threads — ensures `VideoWriter` flushes before `wait(3000)` timeout
+- `QApplication(sys.argv)` replaces `QApplication([])` — required for correct platform plugin initialization on X11 and Wayland
+- `cleanup_by_disk_usage()` moved inside `main()` — previously ran at module import level, outside the `__name__` guard
+
+### Added
+- `__version__ = "3.0.1"` string added to `camera_dashboard.py`
+- `numpy` added explicitly to `requirements.txt` (previously an implicit transitive dependency of `opencv-python`)
+- `Optional[QWidget]` type annotations added to `parent` parameters on `prompt_for_camera_details`, `load_camera_details`, and `prompt_for_first_time_setup`
+- `np.ndarray` type annotation added to `update_frame` `frame` parameter
+
+---
+
 ## [v3.0.0] — 2026-09-05
 
 ### Added
