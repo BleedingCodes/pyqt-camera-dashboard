@@ -1,6 +1,6 @@
 # PyQt Camera Dashboard
 
-![Python](https://img.shields.io/badge/Python-3.10+-blue)
+![Python](https://img.shields.io/badge/Python-3.11+-blue)
 ![PyQt5](https://img.shields.io/badge/GUI-PyQt5-green)
 ![OpenCV](https://img.shields.io/badge/OpenCV-Video-red)
 ![License](https://img.shields.io/badge/License-MIT-yellow)
@@ -68,7 +68,7 @@ Each camera tile has its own controls:
 ---
 
 ### Encrypted Credential Storage
-Camera credentials are never stored in plaintext. On first run the app generates a `secret.key` file beside the script. Every save operation writes JSON and immediately encrypts it with Fernet (AES-128). On load it decrypts before reading.
+Camera credentials are never stored in plaintext. On first run the app generates a `secret.key` file beside the script. Every save operation writes JSON and immediately encrypts it with Fernet (AES-128-CBC + HMAC-SHA256). On load it decrypts before reading.
 
 **Keep `secret.key` private. Do not upload it to GitHub. Without it the config cannot be decrypted.**
 
@@ -198,7 +198,7 @@ pip install -r requirements.txt
 
 | Item | Requirement |
 |---|---|
-| Python | 3.10 or higher |
+| Python | 3.11 or higher |
 | Camera protocol | RTSP |
 | Tested camera format | `rtsp://user:pass@ip:554/cam/realmonitor?channel=1&subtype=0` |
 | OS | Linux (Ubuntu/Debian), Windows 10/11 |
