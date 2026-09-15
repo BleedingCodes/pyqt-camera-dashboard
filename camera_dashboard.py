@@ -5,6 +5,7 @@ import glob
 import json
 import re
 import shutil
+import sys
 import cv2
 import time
 
@@ -12,6 +13,8 @@ from cryptography.fernet import Fernet
 from dataclasses import dataclass
 from datetime import datetime
 from urllib.parse import quote
+from typing import Optional
+import numpy as np
 from PyQt5.QtCore import QThread, Qt, pyqtSignal
 from PyQt5.QtGui import QImage, QPixmap
 from PyQt5.QtWidgets import (
@@ -26,6 +29,9 @@ os.environ["OPENCV_FFMPEG_CAPTURE_OPTIONS"] = "rtsp_transport;tcp|stimeout;50000
 os.environ["QT_QPA_PLATFORM_PLUGIN_PATH"] = os.path.join(
     os.path.dirname(QtCore.__file__), "Qt5", "plugins"
 )  # Forces PyQt5 Qt plugins.
+
+
+__version__ = "3.0.1"
 
 
 # ── Constants ────────────────────────────────────────────────────────────────
@@ -60,6 +66,7 @@ def load_or_create_key() -> bytes:  # Loads existing key or generates a new one.
     key = Fernet.generate_key()  # Generates a new secure key.
     with open(KEY_FILE, "wb") as key_file:  # Saves new key to disk.
         key_file.write(key)  # Writes key bytes.
+    os.chmod(KEY_FILE, 0o600)  # Restricts key file to owner read/write only — never world-readable.
     return key  # Returns new key.
 
 
@@ -110,7 +117,7 @@ def build_rtsp_url(ip_address: str, username: str, password: str) -> str:  # Bui
 
 # ── Camera detail dialogs ─────────────────────────────────────────────────────
 
-def prompt_for_camera_details(parent=None, camera_number: int | None = None) -> dict | None:  # Gets one camera through PyQt dialogs.
+def prompt_for_camera_details(parent: Optional[QWidget] = None, camera_number: int | None = None) -> dict | None:  # Gets one camera through PyQt dialogs.
     title_suffix = f" Camera {camera_number}" if camera_number is not None else " New Camera"  # Builds dialog title suffix.
     ip_address, ok = QInputDialog.getText(parent, f"Setup{title_suffix}", "Camera IP address:")  # Asks for IP address.
     if not ok:
@@ -151,7 +158,7 @@ def save_camera_details(camera_details: list[dict], key: bytes) -> None:  # Writ
     encrypt_config(key)  # Encrypts the file immediately after writing.
 
 
-def load_camera_details(key: bytes, parent=None) -> list[dict]:  # Decrypts and loads config, or runs first-time setup.
+def load_camera_details(key: bytes, parent: Optional[QWidget] = None) -> list[dict]:  # Decrypts and loads config, or runs first-time setup.
     if not os.path.exists(CONFIG_FILE):  # Checks whether setup has already happened.
         return prompt_for_first_time_setup(key, parent)  # Runs first-time setup dialogs.
 
@@ -168,7 +175,7 @@ def load_camera_details(key: bytes, parent=None) -> list[dict]:  # Decrypts and 
     return camera_details  # Returns saved settings.
 
 
-def prompt_for_first_time_setup(key: bytes, parent=None) -> list[dict]:  # Creates first camera JSON using PyQt dialogs.
+def prompt_for_first_time_setup(key: bytes, parent: Optional[QWidget] = None) -> list[dict]:  # Creates first camera JSON using PyQt dialogs.
     camera_count, ok = QInputDialog.getInt(
         parent, "First-time camera setup",
         "How many cameras do you want to monitor?", 1, 1, 64, 1
@@ -274,6 +281,7 @@ class CameraWorker(QThread):  # Background camera thread.
                     self.status_changed.emit("Offline")
                     self.failed_permanently.emit()
                     self.running = False
+                    self.stop_recording()  # Releases VideoWriter before returning — prevents leak on permanent failure.
                     return
                 self.status_changed.emit("Connection failed. Retrying...")
                 time.sleep(RECONNECT_DELAY_SECONDS)
@@ -464,7 +472,7 @@ class CameraTile(QWidget):  # GUI tile for one camera.
     def update_record_button(self, recording: bool) -> None:  # Updates record button text.
         self.record_button.setText("Stop Recording" if recording else "Start Recording")
 
-    def update_frame(self, frame) -> None:  # Updates displayed frame.
+    def update_frame(self, frame: np.ndarray) -> None:  # Updates displayed frame.
         rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
         h, w, channels = rgb.shape
         bytes_per_line = channels * w
@@ -574,6 +582,8 @@ class MainWindow(QMainWindow):  # Main dashboard window.
 
     def closeEvent(self, event) -> None:  # Handles window close.
         for tile in self.tiles:
+            tile.worker.stop_recording()  # Flushes and releases VideoWriter before stopping the thread.
+        for tile in self.tiles:
             tile.worker.stop_worker()
         for tile in self.tiles:
             tile.worker.wait(3000)
@@ -582,11 +592,9 @@ class MainWindow(QMainWindow):  # Main dashboard window.
 
 # ── Entry point ───────────────────────────────────────────────────────────────
 
-cleanup_by_disk_usage()  # Runs disk cleanup before GUI starts.
-
 def main() -> None:  # Program entry point.
     QApplication.setAttribute(Qt.AA_EnableHighDpiScaling, True)
-    app = QApplication([])
+    app = QApplication(sys.argv)
     app.setStyleSheet("""
 QMainWindow { background-color: #121212; }
 QWidget { background-color: #121212; color: #eeeeee; font-size: 14px; }
