@@ -220,3 +220,8 @@ pip install -r requirements.txt
 ## License
 
 MIT License
+
+
+## Built by MainbyteLabs
+Technical documentation and Python tooling for electronics labs and hardware teams — developed with AI, directed and tested by a working electronics technician.
+https://github.com/MR-MainbyteLabs
