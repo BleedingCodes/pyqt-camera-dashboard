@@ -1,6 +1,7 @@
 # Secrets and encrypted config — never commit these
 secret.key
 camera_config.json
+.camera-config-*
 
 # Recordings
 recordings/
