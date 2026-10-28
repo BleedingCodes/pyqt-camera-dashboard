@@ -6,6 +6,7 @@ import json
 import re
 import shutil
 import sys
+import tempfile
 import cv2
 import time
 
@@ -60,26 +61,34 @@ class CameraConfig:  # Defines camera settings.
 # ── Encryption helpers ────────────────────────────────────────────────────────
 
 def load_or_create_key() -> bytes:  # Loads existing key or generates a new one.
-    if os.path.exists(KEY_FILE):  # Checks whether the key file already exists.
-        with open(KEY_FILE, "rb") as key_file:  # Opens existing key file.
-            return key_file.read()  # Returns stored key bytes.
-    key = Fernet.generate_key()  # Generates a new secure key.
-    with open(KEY_FILE, "wb") as key_file:  # Saves new key to disk.
-        key_file.write(key)  # Writes key bytes.
-    os.chmod(KEY_FILE, 0o600)  # Restricts key file to owner read/write only — never world-readable.
-    return key  # Returns new key.
+    try:
+        fd = os.open(KEY_FILE, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        with open(KEY_FILE, "rb") as key_file:
+            key = key_file.read()
+    else:
+        key = Fernet.generate_key()
+        try:
+            with os.fdopen(fd, "wb") as key_file:
+                key_file.write(key)
+        except Exception:
+            try:
+                os.unlink(KEY_FILE)
+            except FileNotFoundError:
+                pass
+            raise
+
+    try:
+        os.chmod(KEY_FILE, 0o600)
+    except OSError:
+        # Windows does not provide POSIX-style permission bits; secure the key
+        # using the platform's file ACLs there.
+        pass
+    return key
 
 
 def get_fernet(key: bytes) -> Fernet:  # Returns a Fernet instance for the given key.
     return Fernet(key)  # Creates Fernet object.
-
-
-def encrypt_config(key: bytes) -> None:  # Encrypts the JSON config file in place.
-    fernet = get_fernet(key)  # Gets Fernet instance.
-    with open(CONFIG_FILE, "rb") as file:  # Opens plaintext config.
-        data = file.read()  # Reads plaintext bytes.
-    with open(CONFIG_FILE, "wb") as file:  # Overwrites config file.
-        file.write(fernet.encrypt(data))  # Writes encrypted bytes.
 
 
 def decrypt_config(key: bytes) -> dict:  # Decrypts and returns parsed JSON config.
@@ -152,10 +161,31 @@ def prompt_for_camera_details(parent: Optional[QWidget] = None, camera_number: i
 
 # ── Config save / load ────────────────────────────────────────────────────────
 
-def save_camera_details(camera_details: list[dict], key: bytes) -> None:  # Writes and encrypts camera settings.
-    with open(CONFIG_FILE, "w", encoding="utf-8") as file:  # Writes plaintext JSON.
-        json.dump({"cameras": camera_details}, file, indent=4)  # Saves readable JSON.
-    encrypt_config(key)  # Encrypts the file immediately after writing.
+def save_camera_details(camera_details: list[dict], key: bytes) -> None:
+    encrypted = get_fernet(key).encrypt(
+        json.dumps({"cameras": camera_details}, indent=4).encode("utf-8")
+    )
+    config_dir = os.path.dirname(CONFIG_FILE) or "."
+    fd, temp_path = tempfile.mkstemp(prefix=".camera-config-", dir=config_dir)
+    try:
+        try:
+            os.fchmod(fd, 0o600)
+        except (AttributeError, OSError):
+            pass
+        with os.fdopen(fd, "wb") as file:
+            fd = -1  # fdopen now owns the descriptor.
+            file.write(encrypted)
+            file.flush()
+            os.fsync(file.fileno())
+        os.replace(temp_path, CONFIG_FILE)
+    except Exception:
+        if fd != -1:
+            os.close(fd)
+        try:
+            os.unlink(temp_path)
+        except FileNotFoundError:
+            pass
+        raise
 
 
 def load_camera_details(key: bytes, parent: Optional[QWidget] = None) -> list[dict]:  # Decrypts and loads config, or runs first-time setup.
