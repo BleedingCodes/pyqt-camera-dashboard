@@ -68,7 +68,7 @@ Each camera tile has its own controls:
 ---
 
 ### Encrypted Credential Storage
-Camera credentials are never stored in plaintext. On first run the app generates a `secret.key` file beside the script. Every save operation writes JSON and immediately encrypts it with Fernet (AES-128-CBC + HMAC-SHA256). On load it decrypts before reading.
+Camera credentials are encrypted in memory before the config is written to disk. Saves write ciphertext to a temporary file and atomically replace `camera_config.json`. On first run the app creates a `secret.key` file beside the script. On load the config is decrypted before reading.
 
 **Keep `secret.key` private. Do not upload it to GitHub. Without it the config cannot be decrypted.**
 
@@ -220,8 +220,3 @@ pip install -r requirements.txt
 ## License
 
 MIT License
-
-
-## Built by MainbyteLabs
-Technical documentation and Python tooling for electronics labs and hardware teams — developed with AI, directed and tested by a working electronics technician.
-https://github.com/MR-MainbyteLabs
